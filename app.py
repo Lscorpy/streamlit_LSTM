@@ -4,7 +4,7 @@ import pandas as pd
 import yfinance as yf
 from datetime import date, timedelta
 
-API_URL = "https://streamlit-lstm.onrender.com/predict"  # replace with your deployed Render backend URL
+API_URL = "https://streamlit-lstm.onrender.com"  # replace with your deployed Render backend URL
 
 TIME_STEP = 31  # must match main.py
 
