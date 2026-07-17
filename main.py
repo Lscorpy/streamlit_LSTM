@@ -41,6 +41,20 @@ class PriceWindow(BaseModel):
         ..., description=f"Chronological closing prices (oldest first), needs >= {TIME_STEP} values"
     )
 
+class MultiDayRequest(BaseModel):
+    closing_prices: List[float] = Field(
+        ..., description=f"Chronological closing prices (oldest first), needs >= {TIME_STEP} values"
+    )
+    days_ahead: int = Field(5, ge=1, le=60, description="How many future days to forecast recursively")
+
+
+def _predict_one(window: np.ndarray) -> float:
+    """Single 1-step prediction from a window of exactly TIME_STEP raw prices."""
+    scaled = scale(window).astype(np.float32).reshape(1, TIME_STEP, 1)
+    onnx_out = session.run([output_name], {input_name: scaled})[0]
+    pred_scaled = float(onnx_out.flatten()[0])
+    return unscale(pred_scaled)
+
 
 @app.get("/health")
 def health():
@@ -59,15 +73,44 @@ def predict(c: PriceWindow):
     # TIME_STEP scaled prices -- no log returns involved (see create_dataset
     # in the training notebook)
     prices = np.array(c.closing_prices[-TIME_STEP:], dtype=np.float64)
-    scaled = scale(prices).astype(np.float32).reshape(1, TIME_STEP, 1)
-
-    onnx_out = session.run([output_name], {input_name: scaled})[0]
-    pred_scaled = float(onnx_out.flatten()[0])
-    pred_price = unscale(pred_scaled)
-
+    pred_price = _predict_one(prices)
     last_price = float(prices[-1])
 
     return {
         "last_price": round(last_price, 2),
         "predicted_next_price": round(pred_price, 2),
     }
+
+
+@app.post("/predict_multi")
+def predict_multi(c: MultiDayRequest):
+    """
+    Recursive multi-day forecast: predicts day+1, appends it to the window,
+    drops the oldest price, predicts day+2, and so on. Each step beyond the
+    first is forecasting from the model's own prior output rather than real
+    data, so error compounds -- treat later days as much less reliable than
+    the first. Swap in real closes as they become available and re-call this
+    endpoint fresh rather than trusting a long unattended forecast.
+    """
+    if len(c.closing_prices) < TIME_STEP:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Need at least {TIME_STEP} closing prices, got {len(c.closing_prices)}.",
+        )
+
+    window = list(c.closing_prices[-TIME_STEP:])
+    last_price = float(window[-1])
+
+    forecasts = []
+    for day in range(1, c.days_ahead + 1):
+        pred_price = _predict_one(np.array(window, dtype=np.float64))
+        forecasts.append({"day": day, "predicted_price": round(pred_price, 2)})
+        window.append(pred_price)  # feed prediction back in
+        window = window[-TIME_STEP:]  # slide the window
+
+    return {
+        "last_known_price": round(last_price, 2),
+        "days_ahead": c.days_ahead,
+        "forecasts": forecasts,
+    }
+
