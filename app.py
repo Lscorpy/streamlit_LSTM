@@ -53,6 +53,17 @@ if st.button("Fetch latest data & predict"):
         st.json(d)
         st.stop()
 
+    # defensive guard: dates/prices should always be the same length, but if an
+    # upstream step (Marketstack gaps, aggregation, etc.) ever desyncs them,
+    # trim to the shorter one instead of crashing the whole app.
+    if len(actual_dates) != len(actual_prices):
+        st.warning(
+            f"Actual dates ({len(actual_dates)}) and prices ({len(actual_prices)}) "
+            f"came back mismatched from the workflow -- trimming to the shorter length."
+        )
+        n = min(len(actual_dates), len(actual_prices))
+        actual_dates, actual_prices = actual_dates[:n], actual_prices[:n]
+
     forecast_prices = [f["predicted_price"] for f in forecasts]
     forecast_dates = pd.to_datetime([f.get("date") for f in forecasts]) if forecasts and forecasts[0].get("date") \
         else pd.bdate_range(start=actual_dates[-1] + pd.Timedelta(days=1), periods=len(forecast_prices))
