@@ -4,39 +4,52 @@ import pandas as pd
 import os
 
 # Set this via environment variable (preferred for Render/Streamlit Cloud) or .streamlit/secrets.toml
-API_BASE = os.environ.get("API_BASE") or st.secrets.get("API_BASE", "https://jjypqr.app.n8n.cloud/webhook-test/run-pipeline")
+# This is your n8n WEBHOOK trigger URL (the "Webhook - Run Pipeline" node), e.g.:
+#   https://your-n8n-instance.app.n8n.cloud/webhook/run-pipeline
+N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL") or st.secrets.get(
+    "N8N_WEBHOOK_URL", "https://jjypqr.app.n8n.cloud/webhook-test/run-pipeline"
+)
 
 st.set_page_config(page_title="TSLA Intelligent Forecast Dashboard", layout="wide")
 st.title("📈 TSLA Smart Price Predictor & Market Insights")
+st.sidebar.caption(f"Pipeline webhook: {N8N_WEBHOOK_URL}")
 
-if st.sidebar.button("🔄 Refresh Dashboard Data"):
-    st.cache_data.clear()
-st.sidebar.caption(f"Backend: {API_BASE}")
+if "data" not in st.session_state:
+    st.session_state.data = None
 
+run_clicked = st.sidebar.button("🚀 Get Forecast")
 
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_latest():
-    response = requests.get(f"{API_BASE}/latest", timeout=30)
-    response.raise_for_status()
-    return response.json()
+if run_clicked:
+    with st.spinner(
+        "Running full pipeline (Marketstack → LSTM forecast → Gemini insight → "
+        "news) — this can take up to a minute..."
+    ):
+        try:
+            # Empty JSON body: n8n's flow doesn't need any input, it fetches
+            # everything itself. A long timeout is important since this call
+            # doesn't return until the entire n8n workflow has finished.
+            response = requests.post(N8N_WEBHOOK_URL, json={}, timeout=120)
+            response.raise_for_status()
+            st.session_state.data = response.json()
+        except requests.exceptions.Timeout:
+            st.error("The pipeline took too long to respond. Please try again.")
+            st.stop()
+        except requests.exceptions.HTTPError as e:
+            st.error(f"n8n returned an error: {e}")
+            st.stop()
+        except Exception as e:
+            st.error(f"Failed to reach n8n webhook at {N8N_WEBHOOK_URL}. Error: {e}")
+            st.stop()
 
+data = st.session_state.data
 
-with st.spinner("Fetching latest automated workflow results..."):
-    try:
-        data = fetch_latest()
-    except requests.exceptions.HTTPError as e:
-        if e.response is not None and e.response.status_code == 404:
-            st.warning("⚠️ No workflow data found. Run your n8n workflow pipeline first!")
-        else:
-            st.error(f"Backend returned an error: {e}")
-        st.stop()
-    except Exception as e:
-        st.error(f"Failed to connect to backend api at {API_BASE}. Error: {e}")
-        st.stop()
+if data is None:
+    st.info("Click **🚀 Get Forecast** in the sidebar to run the pipeline.")
+    st.stop()
 
-# Parse payload
-actual_hist = pd.DataFrame(data["actual_history"])   # Expected: keys 'date' and 'close'
-forecasts_list = pd.DataFrame(data["forecasts"])     # Expected: keys 'date' and 'predicted_price'
+# Parse payload (same shape n8n's "Build Dashboard Payload" node assembles)
+actual_hist = pd.DataFrame(data["actual_history"])   # keys: 'date', 'close'
+forecasts_list = pd.DataFrame(data["forecasts"])     # keys: 'date', 'predicted_price'
 news_list = data.get("news_headlines", [])
 ai_insight = data.get("ai_insight", "No insight available.")
 updated_at = data.get("_updated_at")
@@ -58,27 +71,22 @@ else:
 combined_df = pd.concat([actual_hist["Actual"], forecast_for_chart["Forecast"]], axis=1)
 
 if updated_at:
-    st.caption(f"Last updated: {updated_at} UTC")
+    st.caption(f"Last run: {updated_at}")
 
-# --- MAIN LAYOUT ---
-col1, col2 = st.columns([2, 1])
+st.subheader("Price History + Forecast")
+st.line_chart(combined_df)
 
-with col1:
-    st.subheader("Price History + Multi-Day Forecast Horizon")
-    st.line_chart(combined_df)
+st.subheader("🔮 Forecast Ledger")
+st.dataframe(forecasts_list.rename(columns={"Forecast": "predicted_price"}), use_container_width=True)
 
-    st.subheader("🔮 Multi-Day Forecast Ledger")
-    st.dataframe(forecasts_list.rename(columns={"Forecast": "predicted_price"}), use_container_width=True)
+st.subheader("🤖 AI Market Insight")
+st.info(ai_insight)
 
-with col2:
-    st.subheader("🤖 AI Support & Market Insight")
-    st.info(ai_insight)
-
-    st.subheader("📰 Relevant Context Headlines")
-    if not news_list:
-        st.write("No corresponding contextual news fetched for this run.")
-    for article in news_list[:5]:  # Display top 5 headlines
-        title = article.get("title", "No Title Available")
-        source = article.get("source", "Unknown Source")
-        url = article.get("url", "#")
-        st.markdown(f"- **[{title}]({url})** *(Source: {source})*")
+st.subheader("📰 Relevant Headlines")
+if not news_list:
+    st.write("No corresponding contextual news fetched for this run.")
+for article in news_list[:5]:
+    title = article.get("title", "No Title Available")
+    source = article.get("source", "Unknown Source")
+    url = article.get("url", "#")
+    st.markdown(f"- **[{title}]({url})** *(Source: {source})*")
