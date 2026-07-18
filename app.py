@@ -1,92 +1,91 @@
-import streamlit as st
-import requests
+#app.py
+import streamlit as st, requests
 import pandas as pd
-import os
 
-# Set this via environment variable (preferred for Render/Streamlit Cloud) or .streamlit/secrets.toml
-# This is your n8n WEBHOOK trigger URL (the "Webhook - Run Pipeline" node), e.g.:
-#   https://your-n8n-instance.app.n8n.cloud/webhook/run-pipeline
-N8N_WEBHOOK_URL = os.environ.get("N8N_WEBHOOK_URL") or st.secrets.get(
-    "N8N_WEBHOOK_URL", "https://jjypqr.app.n8n.cloud/webhook-test/run-pipeline"
+# n8n production webhook URL (the "Webhook" node's path is "stock-forecast" in My workflow.json)
+N8N_WEBHOOK_URL = "https://YOUR-N8N-INSTANCE/webhook/stock-forecast"  # replace with your n8n webhook URL
+
+st.title("TSLA Smart Price Predictor")
+
+lookback_days = st.slider(
+    "Lookback buffer (days)",
+    30, 180, 90,
+    help="Extra calendar days to fetch so weekends/holidays don't leave too few trading days. "
+         "n8n / Marketstack use this to fetch enough history for the model's 31-day window.",
 )
 
-st.set_page_config(page_title="TSLA Intelligent Forecast Dashboard", layout="wide")
-st.title("📈 TSLA Smart Price Predictor & Market Insights")
-st.sidebar.caption(f"Pipeline webhook: {N8N_WEBHOOK_URL}")
+days_ahead = st.slider(
+    "Forecast horizon (trading days)",
+    1, 30, 1,
+    help="Day 1 is a real 1-step prediction from actual data. Beyond that, each day is "
+         "forecast from the model's own prior prediction, so accuracy drops the further out you go.",
+)
 
-if "data" not in st.session_state:
-    st.session_state.data = None
-
-run_clicked = st.sidebar.button("🚀 Get Forecast")
-
-if run_clicked:
-    with st.spinner(
-        "Running full pipeline (Marketstack → LSTM forecast → Gemini insight → "
-        "news) — this can take up to a minute..."
-    ):
+if st.button("Fetch latest data & predict"):
+    with st.spinner("Fetching prices, running the model, pulling news, and generating insight..."):
         try:
-            # Empty JSON body: n8n's flow doesn't need any input, it fetches
-            # everything itself. A long timeout is important since this call
-            # doesn't return until the entire n8n workflow has finished.
-            response = requests.post(N8N_WEBHOOK_URL, json={}, timeout=120)
-            response.raise_for_status()
-            st.session_state.data = response.json()
-        except requests.exceptions.Timeout:
-            st.error("The pipeline took too long to respond. Please try again.")
-            st.stop()
-        except requests.exceptions.HTTPError as e:
-            st.error(f"n8n returned an error: {e}")
-            st.stop()
-        except Exception as e:
-            st.error(f"Failed to reach n8n webhook at {N8N_WEBHOOK_URL}. Error: {e}")
+            resp = requests.post(
+                N8N_WEBHOOK_URL,
+                json={"lookback_days": lookback_days, "days_ahead": days_ahead},
+                timeout=120,  # chain of Marketstack -> FastAPI -> Mediastack -> Gemini can take a while
+            )
+            resp.raise_for_status()
+            d = resp.json()
+        except requests.exceptions.RequestException as e:
+            st.error(f"Could not reach the n8n workflow: {e}")
             st.stop()
 
-data = st.session_state.data
+    # ---- Expected response shape from the n8n workflow ----
+    # {
+    #   "actual": {"dates": [...ISO dates...], "closing_prices": [...]},
+    #   "last_known_price": float,
+    #   "forecasts": [{"day": 1, "predicted_price": float, "date": "YYYY-MM-DD"}, ...],
+    #   "insight": {"news_highlight": str, "ai_insight": str}
+    # }
+    try:
+        actual_dates = pd.to_datetime(d["actual"]["dates"])
+        actual_prices = d["actual"]["closing_prices"]
+        forecasts = d["forecasts"]
+        last_known_price = d["last_known_price"]
+        insight = d.get("insight", {})
+    except (KeyError, TypeError) as e:
+        st.error(f"Unexpected response shape from n8n workflow: missing {e}")
+        st.json(d)
+        st.stop()
 
-if data is None:
-    st.info("Click **🚀 Get Forecast** in the sidebar to run the pipeline.")
-    st.stop()
+    forecast_prices = [f["predicted_price"] for f in forecasts]
+    forecast_dates = pd.to_datetime([f.get("date") for f in forecasts]) if forecasts and forecasts[0].get("date") \
+        else pd.bdate_range(start=actual_dates[-1] + pd.Timedelta(days=1), periods=len(forecast_prices))
 
-# Parse payload (same shape n8n's "Build Dashboard Payload" node assembles)
-actual_hist = pd.DataFrame(data["actual_history"])   # keys: 'date', 'close'
-forecasts_list = pd.DataFrame(data["forecasts"])     # keys: 'date', 'predicted_price'
-news_list = data.get("news_headlines", [])
-ai_insight = data.get("ai_insight", "No insight available.")
-updated_at = data.get("_updated_at")
+    if days_ahead == 1:
+        col1, col2 = st.columns(2)
+        col1.metric("Last known close (USD)", f"${last_known_price:.2f}")
+        col2.metric("Predicted next close (USD)", f"${forecast_prices[0]:.2f}")
+    else:
+        st.metric("Last known close (USD)", f"${last_known_price:.2f}")
+        st.caption(
+            f"Showing a {days_ahead}-day recursive forecast. Only day 1 uses real data as "
+            f"input -- later days compound on the model's own prior guesses, so treat them "
+            f"as directional, not precise."
+        )
 
-# Structure dates for plotting
-actual_hist["date"] = pd.to_datetime(actual_hist["date"])
-actual_hist = actual_hist.sort_values("date").set_index("date").rename(columns={"close": "Actual"})
+    # build a combined real + forecast chart, forecast plotted as its own series
+    history = pd.Series(actual_prices, index=actual_dates, name="Actual")
+    forecast_series = pd.Series(forecast_prices, index=forecast_dates, name="Forecast")
+    combined = pd.concat([history, forecast_series], axis=1)
 
-forecasts_list["date"] = pd.to_datetime(forecasts_list["date"])
-forecasts_list = forecasts_list.sort_values("date").set_index("date").rename(columns={"predicted_price": "Forecast"})
+    st.subheader("Price history + forecast")
+    st.line_chart(combined)
 
-# Bridge the visual gap: prepend the last actual price so the forecast line connects to history
-if not actual_hist.empty:
-    bridge = pd.DataFrame({"Forecast": [actual_hist["Actual"].iloc[-1]]}, index=[actual_hist.index[-1]])
-    forecast_for_chart = pd.concat([bridge, forecasts_list[["Forecast"]]])
-else:
-    forecast_for_chart = forecasts_list[["Forecast"]]
+    if days_ahead > 1:
+        st.dataframe(
+            pd.DataFrame({"Date": [dt.date() for dt in forecast_dates], "Predicted Price": forecast_prices})
+        )
 
-combined_df = pd.concat([actual_hist["Actual"], forecast_for_chart["Forecast"]], axis=1)
-
-if updated_at:
-    st.caption(f"Last run: {updated_at}")
-
-st.subheader("Price History + Forecast")
-st.line_chart(combined_df)
-
-st.subheader("🔮 Forecast Ledger")
-st.dataframe(forecasts_list.rename(columns={"Forecast": "predicted_price"}), use_container_width=True)
-
-st.subheader("🤖 AI Market Insight")
-st.info(ai_insight)
-
-st.subheader("📰 Relevant Headlines")
-if not news_list:
-    st.write("No corresponding contextual news fetched for this run.")
-for article in news_list[:5]:
-    title = article.get("title", "No Title Available")
-    source = article.get("source", "Unknown Source")
-    url = article.get("url", "#")
-    st.markdown(f"- **[{title}]({url})** *(Source: {source})*")
+    # ---- News + AI insight, generated by the n8n AI Agent node ----
+    if insight:
+        st.subheader("Market news & AI insight")
+        if insight.get("news_highlight"):
+            st.markdown(f"**News highlight:** {insight['news_highlight']}")
+        if insight.get("ai_insight"):
+            st.info(insight["ai_insight"])
