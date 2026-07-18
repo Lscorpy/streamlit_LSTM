@@ -27,7 +27,7 @@ lookback_days = st.slider(
     "Lookback buffer (days)",
     30, 180, 90,
     help="Extra calendar days to fetch so weekends/holidays don't leave too few trading days. "
-         "n8n / Marketstack use this to fetch enough history for the model's 31-day window. at least 45 days review needed",
+         "n8n / Marketstack use this to fetch enough history for the model's 31-day window. at least 50 days review needed",
 )
  
 days_ahead = st.slider(
