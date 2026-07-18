@@ -3,7 +3,7 @@ import streamlit as st, requests
 import pandas as pd
 
 # n8n production webhook URL (the "Webhook" node's path is "stock-forecast" in My workflow.json)
-N8N_WEBHOOK_URL = "https://jjypqr.app.n8n.cloud/webhook/stock-forecast"  # replace with your n8n webhook URL
+N8N_WEBHOOK_URL = "https://jjypqr.app.n8n.cloud/webhook-test/stock-forecast"  # replace with your n8n webhook URL
 
 def to_naive_datetimeindex(values) -> pd.DatetimeIndex:
     """
