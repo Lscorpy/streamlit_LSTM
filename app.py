@@ -1,17 +1,10 @@
-#app.py
-import streamlit as st, requests
-import pandas as pd
-import yfinance as yf
-from datetime import date, timedelta
-
-API_BASE = "https://streamlit-lstm.onrender.com"  # replace with your deployed Render backend URL
 import streamlit as st
 import requests
 import pandas as pd
 import os
 
 # Set this via environment variable (preferred for Render/Streamlit Cloud) or .streamlit/secrets.toml
-API_BASE = os.environ.get("API_BASE") or st.secrets.get("API_BASE", "https://streamlit-lstm.onrender.com")
+API_BASE = os.environ.get("API_BASE") or st.secrets.get("API_BASE", "https://jjypqr.app.n8n.cloud/webhook-test/run-pipeline")
 
 st.set_page_config(page_title="TSLA Intelligent Forecast Dashboard", layout="wide")
 st.title("📈 TSLA Smart Price Predictor & Market Insights")
