@@ -5,68 +5,87 @@ import yfinance as yf
 from datetime import date, timedelta
 
 API_BASE = "https://streamlit-lstm.onrender.com"  # replace with your deployed Render backend URL
+import streamlit as st
+import requests
+import pandas as pd
+import os
 
-TIME_STEP = 31  # must match main.py
+# Set this via environment variable (preferred for Render/Streamlit Cloud) or .streamlit/secrets.toml
+API_BASE = os.environ.get("API_BASE") or st.secrets.get("API_BASE", "https://streamlit-lstm.onrender.com")
 
-st.title("TSLA Smart Price Predictor")
+st.set_page_config(page_title="TSLA Intelligent Forecast Dashboard", layout="wide")
+st.title("📈 TSLA Smart Price Predictor & Market Insights")
 
-lookback_days = st.slider(
-    "Lookback buffer (days)",
-    30, 180, 90,
-    help="Extra calendar days to fetch so weekends/holidays don't leave too few trading days.",
-)
+if st.sidebar.button("🔄 Refresh Dashboard Data"):
+    st.cache_data.clear()
+st.sidebar.caption(f"Backend: {API_BASE}")
 
-days_ahead = st.slider(
-    "Forecast horizon (trading days)",
-    1, 30, 1,
-    help="Day 1 is a real 1-step prediction from actual data. Beyond that, each day is "
-         "forecast from the model's own prior prediction, so accuracy drops the further out you go.",
-)
 
-if st.button("Fetch latest data & predict"):
-    end = date.today()
-    start = end - timedelta(days=lookback_days)
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_latest():
+    response = requests.get(f"{API_BASE}/latest", timeout=30)
+    response.raise_for_status()
+    return response.json()
 
-    df = yf.download("TSLA", start=start.isoformat(), end=end.isoformat(), auto_adjust=False)
 
-    if len(df) < TIME_STEP:
-        st.error(
-            f"Only {len(df)} trading days returned, need at least {TIME_STEP}. "
-            f"Increase the lookback buffer."
-        )
-    else:
-        closes = df["Close"].tail(TIME_STEP).values.flatten().tolist()
-
-        if days_ahead == 1:
-            d = requests.post(f"{API_BASE}/predict", json={"closing_prices": closes}, timeout=60).json()
-            col1, col2 = st.columns(2)
-            col1.metric("Last known close (USD)", f"${d['last_price']:.2f}")
-            col2.metric("Predicted next close (USD)", f"${d['predicted_next_price']:.2f}")
-            forecast_prices = [d["predicted_next_price"]]
+with st.spinner("Fetching latest automated workflow results..."):
+    try:
+        data = fetch_latest()
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            st.warning("⚠️ No workflow data found. Run your n8n workflow pipeline first!")
         else:
-            payload = {"closing_prices": closes, "days_ahead": days_ahead}
-            d = requests.post(f"{API_BASE}/predict_multi", json=payload, timeout=60).json()
-            st.metric("Last known close (USD)", f"${d['last_known_price']:.2f}")
-            st.caption(
-                f"Showing a {days_ahead}-day recursive forecast. Only day 1 uses real data as "
-                f"input -- later days compound on the model's own prior guesses, so treat them "
-                f"as directional, not precise."
-            )
-            forecast_prices = [f["predicted_price"] for f in d["forecasts"]]
+            st.error(f"Backend returned an error: {e}")
+        st.stop()
+    except Exception as e:
+        st.error(f"Failed to connect to backend api at {API_BASE}. Error: {e}")
+        st.stop()
 
-        # build a combined real + forecast chart, forecast plotted as its own series
-        history = df["Close"].copy()
-        history.name = "Actual"
-        last_date = history.index[-1]
-        future_dates = pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=len(forecast_prices))
-        forecast_series = pd.Series(forecast_prices, index=future_dates, name="Forecast")
+# Parse payload
+actual_hist = pd.DataFrame(data["actual_history"])   # Expected: keys 'date' and 'close'
+forecasts_list = pd.DataFrame(data["forecasts"])     # Expected: keys 'date' and 'predicted_price'
+news_list = data.get("news_headlines", [])
+ai_insight = data.get("ai_insight", "No insight available.")
+updated_at = data.get("_updated_at")
 
-        combined = pd.concat([history, forecast_series], axis=1)
-        st.subheader("Price history + forecast")
-        st.line_chart(combined)
+# Structure dates for plotting
+actual_hist["date"] = pd.to_datetime(actual_hist["date"])
+actual_hist = actual_hist.sort_values("date").set_index("date").rename(columns={"close": "Actual"})
 
-        if days_ahead > 1:
-            st.dataframe(
-                pd.DataFrame({"Date": future_dates.date, "Predicted Price": forecast_prices})
-            )
+forecasts_list["date"] = pd.to_datetime(forecasts_list["date"])
+forecasts_list = forecasts_list.sort_values("date").set_index("date").rename(columns={"predicted_price": "Forecast"})
 
+# Bridge the visual gap: prepend the last actual price so the forecast line connects to history
+if not actual_hist.empty:
+    bridge = pd.DataFrame({"Forecast": [actual_hist["Actual"].iloc[-1]]}, index=[actual_hist.index[-1]])
+    forecast_for_chart = pd.concat([bridge, forecasts_list[["Forecast"]]])
+else:
+    forecast_for_chart = forecasts_list[["Forecast"]]
+
+combined_df = pd.concat([actual_hist["Actual"], forecast_for_chart["Forecast"]], axis=1)
+
+if updated_at:
+    st.caption(f"Last updated: {updated_at} UTC")
+
+# --- MAIN LAYOUT ---
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.subheader("Price History + Multi-Day Forecast Horizon")
+    st.line_chart(combined_df)
+
+    st.subheader("🔮 Multi-Day Forecast Ledger")
+    st.dataframe(forecasts_list.rename(columns={"Forecast": "predicted_price"}), use_container_width=True)
+
+with col2:
+    st.subheader("🤖 AI Support & Market Insight")
+    st.info(ai_insight)
+
+    st.subheader("📰 Relevant Context Headlines")
+    if not news_list:
+        st.write("No corresponding contextual news fetched for this run.")
+    for article in news_list[:5]:  # Display top 5 headlines
+        title = article.get("title", "No Title Available")
+        source = article.get("source", "Unknown Source")
+        url = article.get("url", "#")
+        st.markdown(f"- **[{title}]({url})** *(Source: {source})*")
